@@ -1,18 +1,9 @@
-# =============================================================================
-# requirements.txt  –  LLM Gateway
-# =============================================================================
-# Pin to minor versions for reproducible builds.
-# Run:  pip install -r requirements.txt
-# =============================================================================
 
-# ── Web framework & ASGI ──────────────────────────────────────────────────────
 fastapi>=0.115.0,<0.116.0
-uvicorn[standard]>=0.32.0,<0.33.0          # includes uvloop + httptools
-uvloop>=0.21.0,<0.22.0                     # fast asyncio event loop (Linux/macOS)
-h11>=0.14.0,<0.15.0                        # HTTP/1.1 protocol
+uvicorn[standard]>=0.32.0,<0.33.0          
+h11>=0.14.0,<0.15.0                        
 
-# ── HTTP client ───────────────────────────────────────────────────────────────
-httpx[http2]>=0.28.0,<0.29.0              # async HTTP with HTTP/2 support
+httpx[http2]>=0.28.0,<0.29.0              
 
 # ── Configuration & validation ────────────────────────────────────────────────
 pydantic>=2.10.0,<3.0.0
@@ -23,10 +14,10 @@ redis[asyncio]>=5.2.0,<6.0.0
 
 # ── Semantic embeddings (optional but recommended) ────────────────────────────
 sentence-transformers>=3.3.0,<4.0.0
-torch>=2.5.0,<2.6.0                        # CPU build – replace with +cu121 for GPU
+torch>=2.5.0,<2.6.0                        
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest>=8.3.0,<9.0.0
 pytest-asyncio>=0.24.0,<0.25.0
-httpx>=0.28.0,<0.29.0                     # used by TestClient
-fakeredis[aioredis]>=2.26.0,<3.0.0        # in-memory Redis for unit tests
+httpx>=0.28.0,<0.29.0                    
+fakeredis[aioredis]>=2.26.0,<3.0.0        

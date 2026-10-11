@@ -1,29 +1,3 @@
-"""
-Multi-Provider LLM Router with Failover
------------------------------------------
-Orchestrates requests across multiple upstream LLM providers using a
-priority chain:
-
-  Primary   →  Groq  (fast, cheap, llama-family models)
-  Fallback  →  OpenAI (robust, broad model coverage)
-
-The router integrates the :class:`~app.services.circuit_breaker.CircuitBreaker`
-to skip unavailable providers without waiting for a full timeout, and supports
-transparent **streaming** via Server-Sent Events.
-
-Each provider conforms to the OpenAI Chat Completions API, so switching
-between them requires only swapping the base URL and API key.
-
-Usage::
-
-    router = LLMRouter(settings, circuit_breaker)
-    response = await router.complete(messages, model="llama3-8b-8192")
-
-    # Streaming
-    async for chunk in router.stream(messages, model="llama3-8b-8192"):
-        yield chunk
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -40,34 +14,16 @@ from app.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Provider Descriptor
-# ---------------------------------------------------------------------------
-
 @dataclass
 class Provider:
-    """Static configuration for one upstream LLM provider."""
-
     name: str
     base_url: str
     api_key: str
     default_model: str
-    priority: int = 0   # lower == higher priority
+    priority: int = 0
 
-
-# ---------------------------------------------------------------------------
-# LLM Router
-# ---------------------------------------------------------------------------
 
 class LLMRouter:
-    """
-    Fault-tolerant multi-provider LLM router.
-
-    Args:
-        settings:        Application settings.
-        circuit_breaker: Shared circuit-breaker instance.
-    """
-
     def __init__(self, settings: Settings, circuit_breaker: CircuitBreaker) -> None:
         self._settings = settings
         self._cb = circuit_breaker
@@ -78,16 +34,10 @@ class LLMRouter:
             pool=5.0,
         )
         self._client: Optional[httpx.AsyncClient] = None
-
-        # Build provider chain sorted by priority
         self._providers: list[Provider] = sorted(
             self._build_providers(settings),
             key=lambda p: p.priority,
         )
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _build_providers(settings: Settings) -> list[Provider]:
@@ -116,7 +66,6 @@ class LLMRouter:
         return providers
 
     async def startup(self) -> None:
-        """Create the shared async HTTP client."""
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
             http2=True,
@@ -128,24 +77,15 @@ class LLMRouter:
         )
         log.info(
             "LLMRouter started",
-            extra={
-                "providers": [p.name for p in self._providers],
-                "timeout_s": self._settings.llm_request_timeout,
-            },
+            extra={"providers": [p.name for p in self._providers], "timeout_s": self._settings.llm_request_timeout},
         )
 
     async def shutdown(self) -> None:
-        """Close the HTTP client."""
         if self._client:
             await self._client.aclose()
         log.info("LLMRouter shut down")
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _resolve_model(self, provider: Provider, requested_model: Optional[str]) -> str:
-        """Return the model to use for *provider*, respecting the request."""
         if requested_model:
             return requested_model
         return provider.default_model
@@ -158,13 +98,12 @@ class LLMRouter:
         stream: bool,
         extra_params: Dict[str, Any],
     ) -> dict:
-        payload: dict[str, Any] = {
+        return {
             "model": self._resolve_model(provider, model),
             "messages": messages,
             "stream": stream,
             **extra_params,
         }
-        return payload
 
     def _auth_headers(self, provider: Provider) -> dict:
         return {
@@ -172,34 +111,12 @@ class LLMRouter:
             "Content-Type": "application/json",
         }
 
-    # ------------------------------------------------------------------
-    # Non-streaming completion
-    # ------------------------------------------------------------------
-
     async def complete(
         self,
         messages: List[dict],
         model: Optional[str] = None,
         **extra_params: Any,
     ) -> Dict[str, Any]:
-        """
-        Send a chat-completion request and return the full response.
-
-        Iterates through the provider priority chain, skipping providers
-        whose circuit is OPEN, and retrying on transient errors.
-
-        Args:
-            messages:     OpenAI-format message list.
-            model:        Model name override (uses provider default if None).
-            **extra_params: Additional parameters forwarded to the API
-                            (``temperature``, ``max_tokens``, etc.).
-
-        Returns:
-            OpenAI-format response dict.
-
-        Raises:
-            RuntimeError: When all providers are unavailable.
-        """
         if not self._providers:
             raise RuntimeError("No LLM providers configured")
 
@@ -207,10 +124,7 @@ class LLMRouter:
 
         for provider in self._providers:
             if not self._cb.can_attempt(provider.name):
-                log.warning(
-                    "LLMRouter: skipping provider (circuit open)",
-                    extra={"provider": provider.name},
-                )
+                log.warning("LLMRouter: skipping provider (circuit open)", extra={"provider": provider.name})
                 continue
 
             for attempt in range(1, self._settings.llm_max_retries + 2):
@@ -243,7 +157,7 @@ class LLMRouter:
                         },
                     )
                     if attempt <= self._settings.llm_max_retries:
-                        await asyncio.sleep(0.5 * attempt)  # linear back-off
+                        await asyncio.sleep(0.5 * attempt)
                     else:
                         self._cb.record_failure(provider.name, reason=reason)
                         break
@@ -260,25 +174,16 @@ class LLMRouter:
                         },
                     )
                     self._cb.record_failure(provider.name, reason=reason)
-                    break   # don't retry 4xx/5xx
+                    break
 
                 except Exception as exc:
                     last_error = exc
                     reason = f"{type(exc).__name__}: {exc}"
                     self._cb.record_failure(provider.name, reason=reason)
-                    log.error(
-                        "LLMRouter: unexpected error",
-                        extra={"provider": provider.name, "error": reason},
-                    )
+                    log.error("LLMRouter: unexpected error", extra={"provider": provider.name, "error": reason})
                     break
 
-        raise RuntimeError(
-            f"All LLM providers exhausted. Last error: {last_error}"
-        )
-
-    # ------------------------------------------------------------------
-    # Streaming completion
-    # ------------------------------------------------------------------
+        raise RuntimeError(f"All LLM providers exhausted. Last error: {last_error}")
 
     async def stream(
         self,
@@ -286,15 +191,6 @@ class LLMRouter:
         model: Optional[str] = None,
         **extra_params: Any,
     ) -> AsyncIterator[str]:
-        """
-        Stream chat completion chunks as raw SSE data lines.
-
-        Yields:
-            Raw ``data: {...}`` SSE strings exactly as returned by the provider.
-
-        Raises:
-            RuntimeError: When all providers are unavailable.
-        """
         if not self._providers:
             raise RuntimeError("No LLM providers configured")
 
@@ -303,9 +199,7 @@ class LLMRouter:
                 continue
 
             try:
-                async for chunk in self._stream_provider(
-                    provider, messages, model, extra_params
-                ):
+                async for chunk in self._stream_provider(provider, messages, model, extra_params):
                     yield chunk
                 self._cb.record_success(provider.name)
                 return
@@ -321,10 +215,6 @@ class LLMRouter:
 
         raise RuntimeError("All LLM providers exhausted during streaming")
 
-    # ------------------------------------------------------------------
-    # Low-level HTTP calls
-    # ------------------------------------------------------------------
-
     async def _call_provider(
         self,
         provider: Provider,
@@ -333,18 +223,13 @@ class LLMRouter:
         stream: bool,
         extra_params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Execute a non-streaming HTTP request to *provider*."""
         assert self._client is not None, "LLMRouter not started"
 
         payload = self._build_payload(provider, messages, model, stream=False, extra_params=extra_params)
         url = f"{provider.base_url.rstrip('/')}/chat/completions"
 
         t0 = time.perf_counter()
-        resp = await self._client.post(
-            url,
-            json=payload,
-            headers=self._auth_headers(provider),
-        )
+        resp = await self._client.post(url, json=payload, headers=self._auth_headers(provider))
         elapsed = time.perf_counter() - t0
         resp.raise_for_status()
 
@@ -362,26 +247,16 @@ class LLMRouter:
         model: Optional[str],
         extra_params: Dict[str, Any],
     ) -> AsyncIterator[str]:
-        """Execute a streaming HTTP request to *provider* and yield SSE lines."""
         assert self._client is not None, "LLMRouter not started"
 
         payload = self._build_payload(provider, messages, model, stream=True, extra_params=extra_params)
         url = f"{provider.base_url.rstrip('/')}/chat/completions"
 
-        async with self._client.stream(
-            "POST",
-            url,
-            json=payload,
-            headers=self._auth_headers(provider),
-        ) as resp:
+        async with self._client.stream("POST", url, json=payload, headers=self._auth_headers(provider)) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if line.startswith("data:"):
                     yield line + "\n\n"
-
-    # ------------------------------------------------------------------
-    # Status
-    # ------------------------------------------------------------------
 
     def get_provider_status(self) -> list[dict]:
         return [

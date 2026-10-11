@@ -1,30 +1,3 @@
-"""
-Circuit Breaker Service
-------------------------
-Implements the classic three-state Circuit Breaker pattern
-(CLOSED → OPEN → HALF-OPEN → CLOSED) for each upstream LLM provider.
-
-State machine
-─────────────
-  CLOSED   – traffic flows normally; failures are counted.
-  OPEN     – traffic is blocked; a timer controls when to attempt recovery.
-  HALF-OPEN – a single probe request is allowed to test provider health.
-
-All state is kept **in-process** via a thread-safe dataclass so the gateway
-can make sub-millisecond decisions without a round-trip to Redis.
-
-Usage::
-
-    cb = CircuitBreaker(settings)
-    if cb.can_attempt("groq"):
-        try:
-            result = await call_groq(...)
-            cb.record_success("groq")
-        except Exception:
-            cb.record_failure("groq")
-            raise
-"""
-
 from __future__ import annotations
 
 import threading
@@ -39,29 +12,19 @@ from app.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# State Enum
-# ---------------------------------------------------------------------------
-
 class CBState(Enum):
-    CLOSED = auto()     # Normal operation
-    OPEN = auto()       # Failing – reject all requests
-    HALF_OPEN = auto()  # Testing – allow one probe
+    CLOSED = auto()
+    OPEN = auto()
+    HALF_OPEN = auto()
 
-
-# ---------------------------------------------------------------------------
-# Per-provider State Container
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ProviderState:
-    """Mutable state for one upstream provider."""
-
     name: str
     state: CBState = CBState.CLOSED
     failure_count: int = 0
     success_count: int = 0
-    opened_at: float = 0.0          # epoch seconds when circuit tripped
+    opened_at: float = 0.0
     last_failure_reason: str = ""
     total_requests: int = 0
     total_failures: int = 0
@@ -85,18 +48,7 @@ class ProviderState:
         }
 
 
-# ---------------------------------------------------------------------------
-# Circuit Breaker
-# ---------------------------------------------------------------------------
-
 class CircuitBreaker:
-    """
-    Thread-safe circuit breaker that manages multiple upstream provider states.
-
-    Args:
-        settings: Application settings providing threshold configuration.
-    """
-
     def __init__(self, settings: Settings) -> None:
         self._failure_threshold: int = settings.cb_failure_threshold
         self._recovery_timeout: int = settings.cb_recovery_timeout
@@ -104,19 +56,13 @@ class CircuitBreaker:
         self._providers: Dict[str, ProviderState] = {}
         self._global_lock = threading.Lock()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _get_state(self, provider: str) -> ProviderState:
-        """Return (and lazily create) the ProviderState for *provider*."""
         with self._global_lock:
             if provider not in self._providers:
                 self._providers[provider] = ProviderState(name=provider)
             return self._providers[provider]
 
     def _transition(self, ps: ProviderState, new_state: CBState) -> None:
-        """Transition *ps* to *new_state* and emit a structured log line."""
         old_state = ps.state
         ps.state = new_state
         log.info(
@@ -130,18 +76,7 @@ class CircuitBreaker:
             },
         )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def can_attempt(self, provider: str) -> bool:
-        """
-        Returns *True* when the circuit allows a request to *provider*.
-
-        CLOSED  → always True
-        OPEN    → True only if recovery_timeout has elapsed (triggers HALF-OPEN)
-        HALF-OPEN → True (one probe allowed; caller must call record_*)
-        """
         ps = self._get_state(provider)
         with ps._lock:
             ps.total_requests += 1
@@ -168,16 +103,9 @@ class CircuitBreaker:
                 )
                 return False
 
-            # HALF_OPEN – allow the single probe through
             return True
 
     def record_success(self, provider: str) -> None:
-        """
-        Register a successful upstream call for *provider*.
-
-        HALF-OPEN: increments success counter; closes circuit if threshold met.
-        CLOSED:    resets rolling failure counter.
-        """
         ps = self._get_state(provider)
         with ps._lock:
             ps.total_successes += 1
@@ -188,16 +116,9 @@ class CircuitBreaker:
                     ps.reset_counts()
                     self._transition(ps, CBState.CLOSED)
             elif ps.state == CBState.CLOSED:
-                # Reset rolling failure window on any success
                 ps.failure_count = 0
 
     def record_failure(self, provider: str, reason: str = "") -> None:
-        """
-        Register a failed upstream call for *provider*.
-
-        CLOSED:    increments failure counter; opens circuit if threshold met.
-        HALF-OPEN: immediately re-opens the circuit – probe failed.
-        """
         ps = self._get_state(provider)
         with ps._lock:
             ps.total_failures += 1
@@ -215,7 +136,6 @@ class CircuitBreaker:
             )
 
             if ps.state == CBState.HALF_OPEN:
-                # Probe failed – trip immediately
                 ps.opened_at = time.monotonic()
                 ps.reset_counts()
                 self._transition(ps, CBState.OPEN)
@@ -226,11 +146,9 @@ class CircuitBreaker:
                     self._transition(ps, CBState.OPEN)
 
     def get_status(self) -> dict:
-        """Return a snapshot of all provider states (used by health endpoints)."""
         return {name: ps.to_dict() for name, ps in self._providers.items()}
 
     def reset(self, provider: str) -> None:
-        """Manually reset a provider's circuit to CLOSED (admin use)."""
         ps = self._get_state(provider)
         with ps._lock:
             ps.reset_counts()

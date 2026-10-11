@@ -1,16 +1,3 @@
-"""
-FastAPI Application Factory
------------------------------
-Initialises and assembles the LLM Gateway application:
-
-  • Creates the FastAPI app with full OpenAPI metadata
-  • Registers all service singletons on ``app.state`` during startup
-  • Tears them down gracefully on shutdown
-  • Registers all API routers
-  • Adds CORS, request-ID injection, and global exception handlers
-  • Exposes /health and /status endpoints for orchestrators (k8s probes, etc.)
-"""
-
 from __future__ import annotations
 
 import time
@@ -35,41 +22,23 @@ log = get_logger(__name__)
 settings = get_settings()
 
 
-# ---------------------------------------------------------------------------
-# Lifespan (replaces @app.on_event which is deprecated in FastAPI 0.93+)
-# ---------------------------------------------------------------------------
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Application lifespan handler.
-
-    All service singletons are created once at startup and shared across
-    every request via ``app.state``.  This avoids the overhead of
-    re-initialising connections per request.
-    """
     log.info(
         "Starting LLM Gateway",
-        extra={
-            "version": settings.app_version,
-            "environment": settings.environment,
-            "debug": settings.debug,
-        },
+        extra={"version": settings.app_version, "environment": settings.environment, "debug": settings.debug},
     )
 
-    # ── Instantiate services ───────────────────────────────────────────
     circuit_breaker = CircuitBreaker(settings)
     guardrails = Guardrails(settings)
     rate_limiter = RateLimiter(settings)
     semantic_cache = SemanticCache(settings)
     llm_router = LLMRouter(settings, circuit_breaker)
 
-    # ── Start async services ───────────────────────────────────────────
     await rate_limiter.startup()
     await semantic_cache.startup()
     await llm_router.startup()
 
-    # ── Attach to app.state ────────────────────────────────────────────
     app.state.settings = settings
     app.state.circuit_breaker = circuit_breaker
     app.state.guardrails = guardrails
@@ -80,9 +49,8 @@ async def lifespan(app: FastAPI):
 
     log.info("LLM Gateway startup complete – ready to serve requests")
 
-    yield  # ← application runs here
+    yield
 
-    # ── Graceful shutdown ──────────────────────────────────────────────
     log.info("Shutting down LLM Gateway…")
     await llm_router.shutdown()
     await semantic_cache.shutdown()
@@ -90,13 +58,7 @@ async def lifespan(app: FastAPI):
     log.info("LLM Gateway shut down cleanly")
 
 
-# ---------------------------------------------------------------------------
-# Application factory
-# ---------------------------------------------------------------------------
-
 def create_app() -> FastAPI:
-    """Construct and configure the FastAPI application."""
-
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
@@ -118,18 +80,15 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # ── CORS ───────────────────────────────────────────────────────────
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],          # tighten in production
+        allow_origins=["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Request-ID", "X-RateLimit-Limit",
-                        "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+        expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
     )
 
-    # ── Request-ID middleware ──────────────────────────────────────────
     @app.middleware("http")
     async def attach_request_id(request: Request, call_next):
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
@@ -138,7 +97,6 @@ def create_app() -> FastAPI:
         response.headers["X-Request-ID"] = request_id
         return response
 
-    # ── Latency middleware ─────────────────────────────────────────────
     @app.middleware("http")
     async def add_process_time_header(request: Request, call_next):
         t0 = time.perf_counter()
@@ -147,7 +105,6 @@ def create_app() -> FastAPI:
         response.headers["X-Process-Time-Ms"] = str(elapsed_ms)
         return response
 
-    # ── Global exception handler ───────────────────────────────────────
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
         log.error(
@@ -169,24 +126,14 @@ def create_app() -> FastAPI:
             },
         )
 
-    # ── Routers ────────────────────────────────────────────────────────
     app.include_router(chat_router)
-
-    # ── Built-in utility endpoints ─────────────────────────────────────
 
     @app.get("/health", tags=["Ops"], summary="Liveness probe")
     async def health() -> dict:
-        """Simple liveness probe – returns 200 when the process is up."""
         return {"status": "ok", "service": settings.app_name}
 
     @app.get("/status", tags=["Ops"], summary="Detailed readiness status")
     async def status(request: Request) -> dict:
-        """
-        Detailed readiness endpoint exposing:
-        - Service uptime
-        - Circuit breaker states per provider
-        - Semantic cache statistics
-        """
         uptime = time.time() - getattr(request.app.state, "start_time", time.time())
         cb: CircuitBreaker = request.app.state.circuit_breaker
         cache: SemanticCache = request.app.state.semantic_cache
@@ -206,30 +153,23 @@ def create_app() -> FastAPI:
 
     @app.get("/admin/cache/flush", tags=["Admin"], summary="Flush semantic cache")
     async def flush_cache(request: Request) -> dict:
-        """Flush all entries from the semantic cache (admin use only)."""
         cache: SemanticCache = request.app.state.semantic_cache
         removed = await cache.flush()
         return {"flushed": removed}
 
     @app.get("/admin/circuit/{provider}/reset", tags=["Admin"], summary="Reset circuit breaker")
     async def reset_circuit(provider: str, request: Request) -> dict:
-        """Manually reset a provider's circuit breaker to CLOSED state."""
         cb: CircuitBreaker = request.app.state.circuit_breaker
         cb.reset(provider)
         return {"provider": provider, "state": "CLOSED"}
 
     @app.get("/admin/rate-limit/{team_id}/reset", tags=["Admin"], summary="Reset rate limit")
     async def reset_rate_limit(team_id: str, request: Request) -> dict:
-        """Delete the rate-limit counter for a team (testing / admin)."""
         rl: RateLimiter = request.app.state.rate_limiter
         deleted = await rl.reset(team_id)
         return {"team_id": team_id, "deleted": deleted}
 
     return app
 
-
-# ---------------------------------------------------------------------------
-# Application instance (referenced by Uvicorn / Docker entrypoint)
-# ---------------------------------------------------------------------------
 
 app = create_app()
