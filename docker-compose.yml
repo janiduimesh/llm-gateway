@@ -1,0 +1,112 @@
+# =============================================================================
+# docker-compose.yml  –  LLM Gateway  (FastAPI + Redis)
+# =============================================================================
+#
+# Services:
+#   gateway  –  The FastAPI application (built from local Dockerfile)
+#   redis    –  Redis 7 with AOF persistence and memory limits
+#
+# Usage:
+#   docker compose up --build          # Build and start everything
+#   docker compose up -d               # Detached mode
+#   docker compose logs -f gateway     # Follow gateway logs
+#   docker compose down -v             # Stop and remove volumes
+# =============================================================================
+
+services:
+
+  # ─────────────────────────── LLM Gateway ─────────────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: llm_gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # All settings can be overridden here or via an .env file
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - gateway_network
+    volumes:
+      # Mount model cache so sentence-transformers doesn't re-download on restart
+      - model_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ─────────────────────────── Redis ───────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: llm_gateway_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 10
+      --loglevel notice
+    volumes:
+      - redis_data:/data
+    networks:
+      - gateway_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+# ─────────────────────────── Networks ────────────────────────────────────────
+networks:
+  gateway_network:
+    driver: bridge
+    name: llm_gateway_net
+
+# ─────────────────────────── Volumes ─────────────────────────────────────────
+volumes:
+  redis_data:
+    name: llm_gateway_redis_data
+  model_cache:
+    name: llm_gateway_model_cache
