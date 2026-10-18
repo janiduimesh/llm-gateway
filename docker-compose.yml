@@ -58,6 +58,39 @@ services:
         max-size: "50m"
         max-file: "5"
 
+  # ─────────────────────────── Streamlit Frontend ────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: llm_gateway_frontend
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - GATEWAY_URL=http://gateway:8000
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks:
+      - gateway_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # ─────────────────────────── Redis ───────────────────────────────────────
   redis:
     image: redis:7-alpine
